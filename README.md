@@ -2,6 +2,10 @@
 
 AI-powered semantic search for code repositories using vector embeddings and LLM-based query understanding.
 
+[Chat UX](chat) and [Simple Chat](simple), and list of [modelearth repos](repos) used for Pinecoce RAG vector training. And upcoming [React NextJS Chat](https://model.earth/chat/).
+
+<!-- temp here -->
+
 ## Architecture Overview
 
 CodeChat consists of three main components:
