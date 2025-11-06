@@ -1,5 +1,5 @@
 ﻿"""
-End-to-end test for codechat/vectordb_sync.py.
+End-to-end test for codechat/ingestion/vector_db_sync.py.
 
 This runs real API calls (OpenAI + Pinecone) and cleans up vectors.
 
@@ -9,7 +9,7 @@ Scenarios:
 - Rename (D+M) -> delete old, index new
 - Delete (D) -> remove vectors
 
-Run: python codechat/test_vectordb_sync.py
+Run: python codechat/ingestion/test_vector_db_sync.py
 """
 
 import os
@@ -22,11 +22,12 @@ from typing import Tuple, List
 from dotenv import load_dotenv
 from openai import OpenAI
 
-# Ensure we can import vectordb_sync from the same folder
-THIS_DIR = Path(__file__).parent
-REPO_ROOT = THIS_DIR.parent
+# Path calculations based on test file location
+THIS_DIR = Path(__file__).parent  # codechat/ingestion/
+CODECHAT_ROOT = THIS_DIR.parent  # codechat/
+REPO_ROOT = CODECHAT_ROOT.parent  # webroot/
 sys.path.insert(0, str(THIS_DIR))
-import vectordb_sync  # type: ignore
+import vector_db_sync  # type: ignore
 
 
 def ensure_env() -> Tuple[str, str, str]:
@@ -39,7 +40,7 @@ def ensure_env() -> Tuple[str, str, str]:
     repo_name = f"vector-sync-test-{uuid.uuid4().hex[:8]}"
     os.environ["GITHUB_REPOSITORY"] = f"local/{repo_name}"
 
-    index_name = os.getenv("PINECONE_INDEX", vectordb_sync.INDEX_NAME)
+    index_name = os.getenv("PINECONE_INDEX", vector_db_sync.INDEX_NAME)
     env = os.getenv("PINECONE_ENV", "us-west1-gcp")
     return repo_name, index_name, env
 
@@ -114,14 +115,14 @@ def wait_for_count(index, namespace: str, query_vec, expect_path: str, expect_mi
 
 
 def main() -> None:
-    # Load local env file
-    load_dotenv(dotenv_path=str(THIS_DIR / ".env"), override=True)
+    # Load local env file from codechat/.env
+    load_dotenv(dotenv_path=str(CODECHAT_ROOT / ".env"), override=True)
     repo_name, index_name, env = ensure_env()
 
     # Test artifacts
-    test_file_1 = REPO_ROOT / "codechat" / f"_tmp_vector_sync_test_{uuid.uuid4().hex[:8]}.md"
+    test_file_1 = CODECHAT_ROOT / f"_tmp_vector_sync_test_{uuid.uuid4().hex[:8]}.md"
     test_file_2 = test_file_1.with_name(test_file_1.stem + "_renamed.md")
-    errors_file = REPO_ROOT / "codechat" / "_tmp_vector_sync_errors.jsonl"
+    errors_file = CODECHAT_ROOT / "_tmp_vector_sync_errors.jsonl"
 
     # Index handle obtained after first sync (index may be created there)
     index = None
@@ -135,13 +136,13 @@ def main() -> None:
         test_file_1.write_text(content_add, encoding="utf-8")
         created_files.append(test_file_1)
         # Add via run_sync (capture ids for fetch-by-id verification)
-        res = vectordb_sync.run_sync([("A", f"codechat/{test_file_1.name}")], str(errors_file))
+        res = vector_db_sync.run_sync([("A", f"codechat/{test_file_1.name}")], str(errors_file))
         index = get_index_handle(index_name)
         add_ids = res.get("upserted_ids", [])
         ns = res.get("namespace", repo_name)
         if not add_ids:
             # Force a follow-up modify upsert to ensure IDs are available
-            res2 = vectordb_sync.run_sync([("M", f"codechat/{test_file_1.name}")], str(errors_file))
+            res2 = vector_db_sync.run_sync([("M", f"codechat/{test_file_1.name}")], str(errors_file))
             add_ids = res2.get("upserted_ids", [])
             ns = res2.get("namespace", ns)
         if not add_ids or not wait_fetch_by_ids(index, ns, add_ids):
@@ -150,7 +151,7 @@ def main() -> None:
         # 2) Modify
         content_mod = "# Vector Sync Test\n\nModified content."
         test_file_1.write_text(content_mod, encoding="utf-8")
-        res = vectordb_sync.run_sync([("M", f"codechat/{test_file_1.name}")], str(errors_file))
+        res = vector_db_sync.run_sync([("M", f"codechat/{test_file_1.name}")], str(errors_file))
         mod_ids = res.get("upserted_ids", [])
         if not mod_ids or not wait_fetch_by_ids(index, res.get("namespace", repo_name), mod_ids, attempts=15, delay=1.0):
             raise AssertionError("No vectors found after Modify (fetch-by-id)")
@@ -159,7 +160,7 @@ def main() -> None:
         test_file_1.rename(test_file_2)
         created_files.append(test_file_2)
         # Rename as D old + M new
-        res = vectordb_sync.run_sync([
+        res = vector_db_sync.run_sync([
             ("D", f"codechat/{test_file_1.name}"),
             ("M", f"codechat/{test_file_2.name}")
         ], str(errors_file))
@@ -174,7 +175,7 @@ def main() -> None:
         # 4) Delete
         if test_file_2.exists():
             test_file_2.unlink()
-        res = vectordb_sync.run_sync([("D", f"codechat/{test_file_2.name}")], str(errors_file))
+        res = vector_db_sync.run_sync([("D", f"codechat/{test_file_2.name}")], str(errors_file))
         fetched_del = index.fetch(ids=new_ids, namespace=res.get("namespace", repo_name))
         vecs_del = fetched_del.get("vectors", {}) if isinstance(fetched_del, dict) else getattr(fetched_del, "vectors", {})
         if vecs_del:

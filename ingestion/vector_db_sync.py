@@ -29,6 +29,7 @@ Env vars
 # pyright: basic
 
 import os
+import sys
 import uuid
 import re
 import json
@@ -37,19 +38,11 @@ from typing import List, Tuple, Optional
 from openai import OpenAI
 import tiktoken
 from tqdm import tqdm
-import yaml
 import argparse
 import subprocess
 
-# Optional: tree-sitter (graceful fallback if unavailable)
-try:
-    from tree_sitter import Language, Parser  # type: ignore
-
-    TREE_SITTER_AVAILABLE = True
-except Exception:
-    Language = None  # type: ignore
-    Parser = None  # type: ignore
-    TREE_SITTER_AVAILABLE = False
+# Import unified chunker (same directory)
+from llama_chunker import LlamaChunker
 
 # Constants
 MAX_TOKENS = 8192
@@ -57,48 +50,6 @@ INDEX_NAME = "repo-chunks"
 DIMENSION = 1536
 METRIC = "cosine"
 BATCH_SIZE = 10
-
-# Dynamic path search for tree-sitter compiled library
-SCRIPT_DIR = Path(__file__).parent
-_LANG_SO_CANDIDATES = [
-    SCRIPT_DIR / "ingestion" / "build" / "my-languages.so",
-    SCRIPT_DIR / "build" / "my-languages.so",
-    SCRIPT_DIR.parent / "my-languages.so",
-]
-LANGUAGES_SO_PATH = next((p for p in _LANG_SO_CANDIDATES if p.exists()), _LANG_SO_CANDIDATES[0])
-
-# Language mappings (only if tree-sitter and .so are available)
-LANGUAGES = {}
-if TREE_SITTER_AVAILABLE and Path(LANGUAGES_SO_PATH).exists():
-    try:
-        LANGUAGES = {
-            '.py': Language(str(LANGUAGES_SO_PATH), 'python'),
-            '.js': Language(str(LANGUAGES_SO_PATH), 'javascript'),
-            '.jsx': Language(str(LANGUAGES_SO_PATH), 'javascript'),
-            '.cjs': Language(str(LANGUAGES_SO_PATH), 'javascript'),
-            '.mjs': Language(str(LANGUAGES_SO_PATH), 'javascript'),
-            '.ts': Language(str(LANGUAGES_SO_PATH), 'typescript'),
-            '.tsx': Language(str(LANGUAGES_SO_PATH), 'typescript'),
-            '.java': Language(str(LANGUAGES_SO_PATH), 'java'),
-            '.cpp': Language(str(LANGUAGES_SO_PATH), 'cpp'),
-            '.c': Language(str(LANGUAGES_SO_PATH), 'c'),
-            '.cs': Language(str(LANGUAGES_SO_PATH), 'c_sharp'),
-            '.go': Language(str(LANGUAGES_SO_PATH), 'go'),
-            '.rb': Language(str(LANGUAGES_SO_PATH), 'ruby'),
-            '.php': Language(str(LANGUAGES_SO_PATH), 'php'),
-            '.rs': Language(str(LANGUAGES_SO_PATH), 'rust'),
-            '.swift': Language(str(LANGUAGES_SO_PATH), 'swift'),
-            '.kt': Language(str(LANGUAGES_SO_PATH), 'kotlin'),
-            '.kts': Language(str(LANGUAGES_SO_PATH), 'kotlin'),
-            '.scala': Language(str(LANGUAGES_SO_PATH), 'scala'),
-            '.html': Language(str(LANGUAGES_SO_PATH), 'html'),
-            '.css': Language(str(LANGUAGES_SO_PATH), 'css'),
-            '.scss': Language(str(LANGUAGES_SO_PATH), 'css'),
-            '.xml': Language(str(LANGUAGES_SO_PATH), 'xml'),
-            '.sh': Language(str(LANGUAGES_SO_PATH), 'bash'),
-        }
-    except Exception:
-        LANGUAGES = {}
 
 # Prefer serverless Pinecone SDK; fallback to classic client if not available
 USE_SERVERLESS = False
@@ -121,6 +72,7 @@ except Exception:
 index = None
 openai_client = None
 tokenizer = None
+chunker = None  # LlamaChunker instance
 
 
 def count_tokens(text: str) -> int:
@@ -187,171 +139,27 @@ def detect_file_type(filepath: str) -> str:
     return ext.lstrip('.')
 
 
-def chunk_code_tree_sitter(filepath: str, ext: str) -> Tuple[List[str], bool]:
-    """Chunk code using tree-sitter parsing if available; fallback to plain text."""
-    if not TREE_SITTER_AVAILABLE or ext not in LANGUAGES:
-        try:
-            code = Path(filepath).read_text(encoding="utf-8", errors="ignore")
-            return re_chunk_if_oversize([code]), True
-        except Exception as e:
-            return [f"Error reading {filepath}: {e}"], False
-
-    parser = Parser()  # type: ignore
-    try:
-        parser.set_language(LANGUAGES[ext])
-    except Exception:
-        try:
-            code = Path(filepath).read_text(encoding="utf-8", errors="ignore")
-            return re_chunk_if_oversize([code]), True
-        except Exception as e2:
-            return [f"Error reading {filepath}: {e2}"], False
-
-    try:
-        code = Path(filepath).read_text(encoding="utf-8", errors="ignore")
-        tree = parser.parse(code.encode("utf-8"))
-        root = tree.root_node
-        chunks: List[str] = []
-
-        meaningful_nodes = {
-            'python': ['function_definition', 'class_definition', 'decorated_definition'],
-            'javascript': ['function_declaration', 'function_expression', 'class_declaration', 'method_definition'],
-            'typescript': ['function_declaration', 'function_expression', 'class_declaration', 'method_definition',
-                           'interface_declaration'],
-            'java': ['class_declaration', 'method_declaration', 'interface_declaration'],
-            'cpp': ['function_definition', 'class_specifier', 'struct_specifier'],
-            'c': ['function_definition', 'struct_specifier'],
-            'go': ['function_declaration', 'type_declaration', 'method_declaration'],
-            'rust': ['function_item', 'impl_item', 'struct_item', 'enum_item'],
-            'html': ['element'],
-            'css': ['rule_set', 'at_rule'],
-            'bash': ['function_definition']
-        }
-
-        target_types = meaningful_nodes.get(LANGUAGES[ext].name, ['function_definition', 'class_definition'])
-
-        def extract_chunks(node):
-            if node.type in target_types:
-                snippet = code[node.start_byte:node.end_byte]
-                if snippet.strip():
-                    chunks.append(snippet.strip())
-            else:
-                for child in node.children:
-                    extract_chunks(child)
-
-        extract_chunks(root)
-
-        if not chunks:
-            chunks = [code.strip()[:3000]]
-
-        return re_chunk_if_oversize(chunks), True
-
-    except Exception:
-        try:
-            code = Path(filepath).read_text(encoding="utf-8", errors="ignore")
-            return re_chunk_if_oversize([code]), True
-        except Exception as e2:
-            return [f"Error reading {filepath}: {e2}"], False
+# Chunking functions replaced by LlamaChunker
+# chunk_code_tree_sitter, chunk_markdown, chunk_json_yaml removed
 
 
-def chunk_markdown(filepath: str) -> List[str]:
-    try:
-        text = Path(filepath).read_text(encoding="utf-8")
-    except Exception as e:
-        return [f"Error reading {filepath}: {e}"]
-
-    sections: List[str] = []
-    current: List[str] = []
-    for line in text.splitlines():
-        if line.startswith("#") and current:
-            sections.append("\n".join(current).strip())
-            current = []
-        current.append(line)
-
-    if current:
-        sections.append("\n".join(current).strip())
-
-    return re_chunk_if_oversize(sections)
-
-
-def chunk_json_yaml(filepath: str) -> List[str]:
-    try:
-        with open(filepath, 'r', encoding="utf-8") as f:
-            if Path(filepath).suffix in {'.yaml', '.yml'}:
-                data = yaml.safe_load(f)
-            else:
-                data = json.load(f)
-
-        chunks: List[str] = []
-
-        def chunk_value(value, key_path: str = ""):
-            text = json.dumps({key_path: value} if key_path else value, indent=2)
-            if count_tokens(text) <= MAX_TOKENS:
-                chunks.append(text)
-            else:
-                if isinstance(value, dict):
-                    for k, v in value.items():
-                        new_path = f"{key_path}.{k}" if key_path else k
-                        chunk_value(v, new_path)
-                elif isinstance(value, list) and len(value) > 1:
-                    mid = len(value) // 2
-                    chunk_value(value[:mid], f"{key_path}[0:{mid}]")
-                    chunk_value(value[mid:], f"{key_path}[{mid}:]")
-                else:
-                    chunks.append(text[:3000])
-
-        chunk_value(data)
-        return re_chunk_if_oversize(chunks)
-
-    except Exception as e:
-        return [f"Error parsing {filepath}: {e}"]
-
-
-def chunk_ipynb(filepath: str):
-    try:
-        with open(filepath, 'r', encoding="utf-8") as f:
-            notebook = json.load(f)
-
-        chunks: List[str] = []
-        for i, cell in enumerate(notebook.get('cells', [])):
-            source = ''.join(cell.get('source', [])).strip()
-            if not source:
-                continue
-
-            cell_type = cell.get('cell_type', 'unknown')
-            if cell_type == 'markdown':
-                chunks.append(f"[Markdown Cell {i + 1}]\n{source}")
-            elif cell_type == 'code':
-                chunks.append(f"[Code Cell {i + 1}]\n{source}")
-            else:
-                chunks.append(f"[{cell_type.title()} Cell {i + 1}]\n{source}")
-
-        return re_chunk_if_oversize(chunks), True
-
-    except Exception as e:
-        return [f"Error parsing notebook {filepath}: {e}"], False
-
+# chunk_ipynb removed - LlamaIndex JSONNodeParser handles .ipynb files as JSON
 
 def chunk_csv_tsv(filepath: Path):
+    """Simplified CSV/TSV handling without pandas dependency"""
     try:
-        import pandas as pd
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = [f.readline() for _ in range(20)]  # Read first 20 lines
 
-        sep = '\t' if filepath.suffix == '.tsv' else None
-        df = pd.read_csv(filepath, sep=sep, engine='python', nrows=10,
-                         encoding='utf-8', encoding_errors='ignore')
-
-        columns = ", ".join(df.columns.tolist())
-        row_count = len(df)
-        preview = df.head().to_string(index=False)
-
-        summary = f"""CSV/TSV File Summary:
-Columns: {columns}
-Rows (showing first {row_count}):
-{preview}
+        content = ''.join(lines)
+        summary = f"""CSV/TSV File: {filepath.name}
+First 20 lines preview:
+{content}
 """
         return re_chunk_if_oversize([summary]), True
 
     except Exception as e:
-        return [f"Error parsing CSV {filepath}: {e}"], False
+        return [f"Error reading CSV {filepath}: {e}"], False
 
 
 def chunk_as_summary(filepath: Path):
@@ -381,27 +189,27 @@ Type: {file_type}
 
 
 def dispatch_chunking(filepath: Path):
+    """Simplified chunking - LlamaIndex replaces all custom AST parsing"""
     path = Path(filepath)
     ext = path.suffix.lower()
 
-    if ext in LANGUAGES:
-        return chunk_code_tree_sitter(str(filepath), ext)
-    elif ext == ".ipynb":
-        return chunk_ipynb(str(filepath))
-    elif ext in {".md", ".mdx", ".txt", ".rst", ".adoc"}:
-        return chunk_markdown(str(filepath)), True
-    elif ext in {".json", ".yaml", ".yml", ".jsonl", ".webmanifest"}:
-        return chunk_json_yaml(str(filepath)), True
-    elif ext in {".html", ".htm", ".xhtml"}:
-        return chunk_code_tree_sitter(str(filepath), '.html')
-    elif ext in {".css", ".scss", ".sass", ".less"}:
-        return chunk_code_tree_sitter(str(filepath), '.css')
-    elif ext in {".xml", ".xsd", ".xsl"}:
-        return chunk_code_tree_sitter(str(filepath), '.xml')
-    elif ext in {".csv", ".tsv"}:
+    # CSV/TSV: simple preview (no pandas needed)
+    if ext in {".csv", ".tsv"}:
         return chunk_csv_tsv(path)
-    else:
-        return chunk_as_summary(path)
+
+    # LlamaIndex handles: py, js, ts, java, cpp, go, rust, etc. (code)
+    #                     md, txt, rst (markdown)
+    #                     json, yaml, yml, ipynb (structured data)
+    #                     html, css, xml (markup)
+    try:
+        chunks = chunker.chunk_file(str(filepath))
+        if chunks:
+            return chunks, True
+    except Exception as e:
+        print(f"LlamaChunker error for {filepath}: {e}")
+
+    # Fallback: binary/unsupported files get metadata summary
+    return chunk_as_summary(path)
 
 
 def get_embedding(text: str) -> List[float]:
@@ -534,6 +342,54 @@ def safe_upsert_batch(batch: List[dict], repo_name: str) -> int:
     return len(batch)
 
 
+def detect_github_commit_range() -> Tuple[str, str]:
+    """
+    Auto-detect commit range from GitHub Actions environment.
+    Returns (from_commit, to_commit) tuple.
+    Raises RuntimeError if not in GitHub Actions or if detection fails.
+    """
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    event_name = os.environ.get("GITHUB_EVENT_NAME")
+    github_sha = os.environ.get("GITHUB_SHA")
+
+    if not event_path:
+        raise RuntimeError("GITHUB_EVENT_PATH not set. Cannot auto-detect commit range. "
+                          "Provide --from-commit or run in GitHub Actions environment.")
+
+    if not os.path.exists(event_path):
+        raise RuntimeError(f"GitHub event file not found: {event_path}")
+
+    try:
+        with open(event_path, 'r', encoding='utf-8') as f:
+            event = json.load(f)
+    except Exception as e:
+        raise RuntimeError(f"Failed to parse GitHub event file: {e}")
+
+    if event_name == "push":
+        base = event.get("before", "")
+        head = github_sha or event.get("after", "")
+    elif event_name == "pull_request":
+        pr = event.get("pull_request", {})
+        base = pr.get("base", {}).get("sha", "")
+        head = pr.get("merge_commit_sha") or github_sha or ""
+    else:
+        raise RuntimeError(f"Unsupported GitHub event type: {event_name}. "
+                          "Only 'push' and 'pull_request' events are supported. "
+                          "Use --from-commit for manual runs.")
+
+    # Handle empty tree / first commit
+    if not base or base == "0000000000000000000000000000000000000000":
+        if head:
+            base = f"{head}^"
+        else:
+            raise RuntimeError("Cannot determine base commit: both base and head are missing from event data")
+
+    if not head:
+        raise RuntimeError("Cannot determine head commit: missing from GitHub event data")
+
+    return (base, head)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="VectorDB sync")
     parser.add_argument("changed_files", nargs="?", help="Path to changed_files.txt from git diff --name-status")
@@ -544,10 +400,13 @@ def parse_args():
     parser.add_argument("--errors-out", dest="errors_out", default="codechat/.vector_sync_errors.jsonl",
                         help="Path to write JSONL errors")
     parser.add_argument("--from-commit", dest="from_commit",
-                        help="Compute changes from this commit/ref to HEAD or --to-commit")
+                        help="Compute changes from this commit/ref to HEAD or --to-commit. "
+                             "For bulk ingestion of all files, use: 4b825dc642cb6eb9a060e54bf8d69288fbee4904 (empty tree)")
     parser.add_argument("--to-commit", dest="to_commit", default="HEAD", help="End commit/ref for diff (default: HEAD)")
     parser.add_argument("--repo-root", dest="repo_root", default=".",
                         help="Path to the git superproject root (default: current dir)")
+    parser.add_argument("--skip-on-missing-keys", action="store_true",
+                        help="Exit gracefully (code 0) if API keys are missing instead of raising an error")
     return parser.parse_args()
 
 
@@ -646,6 +505,21 @@ def compute_changes_from_git(repo_root: str, from_rev: str, to_rev: str) -> List
 
 def main_entry():
     args = parse_args()
+
+    # Validate required API keys
+    missing_keys = []
+    if not os.environ.get("PINECONE_API_KEY"):
+        missing_keys.append("PINECONE_API_KEY")
+    if not os.environ.get("OPENAI_API_KEY"):
+        missing_keys.append("OPENAI_API_KEY")
+
+    if missing_keys:
+        if args.skip_on_missing_keys:
+            print(f"[skip] Missing required API keys: {', '.join(missing_keys)}; skipping VectorDB sync.")
+            sys.exit(0)
+        else:
+            raise RuntimeError(f"Missing required API keys: {', '.join(missing_keys)}")
+
     errors_out = args.errors_out
     files_to_process: List[Tuple[str, str]] = []
 
@@ -678,8 +552,16 @@ def main_entry():
         else:
             raise RuntimeError(f"Errors file not found: {args.retry_errors}")
     else:
-        if args.from_commit:
-            changes = compute_changes_from_git(args.repo_root, args.from_commit, args.to_commit or "HEAD")
+        from_commit = args.from_commit
+        to_commit = args.to_commit or "HEAD"
+
+        # Auto-detect commit range from GitHub Actions if not explicitly provided
+        if not from_commit and not args.changed_files:
+            from_commit, to_commit = detect_github_commit_range()
+            print(f"[info] Auto-detected commit range from GitHub Actions: {from_commit}..{to_commit}")
+
+        if from_commit:
+            changes = compute_changes_from_git(args.repo_root, from_commit, to_commit)
             for st, fp in changes:
                 if st.startswith('R'):
                     continue
@@ -780,9 +662,12 @@ def run_sync(files_to_process: List[Tuple[str, str]], errors_out: str):
     openai_client = OpenAI(api_key=oai_key)
     tokenizer = tiktoken.get_encoding("cl100k_base")
 
+    # Initialize LlamaChunker for unified chunking
+    global chunker
+    chunker = LlamaChunker()
+
     print(f"[info] Starting VectorDB sync for {repo_name} (commit: {commit_sha[:8]})")
-    print(
-        f"[info] Using tree-sitter library: {LANGUAGES_SO_PATH} (available={TREE_SITTER_AVAILABLE and Path(LANGUAGES_SO_PATH).exists()})")
+    print(f"[info] Using LlamaIndex for intelligent code-aware chunking")
 
     to_upsert: List[dict] = []
     delete_operations: List[str] = []

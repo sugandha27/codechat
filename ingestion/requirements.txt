@@ -1,0 +1,9 @@
+# Ingestion dependencies for vector_db_sync.py (CI/CD pipeline)
+# Explicit dependencies we directly use (even if some are transitive via llama-index-core)
+openai>=1.12.0
+pinecone-client>=3.0.0
+llama-index-core>=0.12.0
+tree-sitter-language-pack>=0.1.0
+PyYAML>=6.0
+tiktoken>=0.5.0
+tqdm>=4.66.0
