@@ -6,7 +6,13 @@ AI-powered semantic search for code repositories using vector embeddings and LLM
 
 [Chat UX](chat) and [Simple Chat](simple), and list of [modelearth repos](https://model.earth/codechat) used for Pinecoce RAG vector training. 
 
-<!-- temp here -->
+<!-- 
+About Pinecone and Cloudflare Vectorize
+
+Choose Pinecone if you require a dedicated, high-performance, and scalable vector database for large or rapidly changing datasets, prioritize a robust developer experience, and need the flexibility to integrate with various external embedding models.
+
+Cloudflare Vectorize if you are already using Cloudflare's services, prioritize a unified and cost-effective solution within a single platform, and value ease of integration with other Cloudflare AI tools. Cloudflare Vectorize: https://developers.cloudflare.com/vectorize/
+-->
 
 ## Architecture Overview
 
